@@ -163,7 +163,10 @@ def llr_binary(num_classes, num_samples, DTR, LTR, DTE, version):
         else:
             C = eval_cov(D_cls)
         logS[_, :] = logpdf_GAU_ND(DTE, mcol(eval_mu(D_cls)), C)
-    return logS[1]-logS[0]
+
+    llrs = logS[1] - logS[0]
+    predictions = np.where(llrs >= 0, True, False)
+    return predictions, llrs
 
 def errorRateLab3(DVAL_lda, DTR_lda, LTR, LVAL, threshold=0):
     if threshold == 0:
@@ -180,20 +183,20 @@ def errorRateLab3(DVAL_lda, DTR_lda, LTR, LVAL, threshold=0):
 
 def optBayesDecisions(llr, pi1, Cfn, Cfp):
     threshold = -np.log(pi1 * Cfn / ((1 - pi1) * Cfp))
-    decisions = (llr > threshold).astype(int)
+    decisions = np.where(llr > threshold, True, False)
     return decisions
 
 def confMatrix(predictions, labels):
-    TP = np.sum((predictions == 1) & (labels == 1))
-    TN = np.sum((predictions == 0) & (labels == 0))
-    FP = np.sum((predictions == 1) & (labels == 0))
-    FN = np.sum((predictions == 0) & (labels == 1))
+    TP = np.sum((predictions == True) & (labels == True))
+    TN = np.sum((predictions == False) & (labels == False))
+    FP = np.sum((predictions == True) & (labels == False))
+    FN = np.sum((predictions == False) & (labels == True))
     conf_matrix = np.array([[TN, FP], [FN, TP]])
     return conf_matrix
 
 def bayesRisk(pi1, Cfn, Cfp, conf_matrix):
-    Pfn = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[1, 1])
-    Pfp = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[0, 0])
+    Pfn = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])
+    Pfp = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])
     B = pi1 * Cfn * Pfn + (1 - pi1) * Cfp * Pfp
     return B
 
@@ -208,25 +211,29 @@ def minDCF(llr, labels, pi1, Cfn, Cfp):
     thresholds = np.concatenate(([-np.inf], thresholds, [np.inf]))  # Aggiungi -∞ e +∞
     
     min_dcf = float('inf')
-    for i in range(1, len(thresholds) - 1):
-        threshold = thresholds[i]
-        decisions = (llr > threshold).astype(int)
+    for threshold in thresholds:
+        decisions = np.where(llr > threshold, True, False)
         conf_matrix = confMatrix(decisions, labels)
-        conf_matrix = conf_matrix.T  # Scambia righe e colonne
         dcf = normDCF(pi1, Cfn, Cfp, conf_matrix)
         min_dcf = min(min_dcf, dcf)
     
     return min_dcf
 
-def BD_DCF_minDCF(llr, labels, pi1, Cfn = 1, Cfp = 1):
-    Bayes_decisions = optBayesDecisions(llr, pi1, Cfn, Cfp)
-    conf_matrix = confMatrix(Bayes_decisions, labels).T
-    
-    DCF = normDCF(pi1, Cfn, Cfp, conf_matrix).round(3)
-    DCF_min = minDCF(llr, labels, pi1, Cfn, Cfp).round(3)
-    return Bayes_decisions, DCF, DCF_min
+def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
+    pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
+    actual_dcf_values = []
+    min_dcf_values = []
 
-def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1):
+    for pi_eff_value in pi_eff:
+        act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), labels))
+        min_dcf = minDCF(llr, labels, pi_eff_value, Cfn, Cfp)
+
+        actual_dcf_values.append(act_dcf)
+        min_dcf_values.append(min_dcf)
+
+    return actual_dcf_values, min_dcf_values
+
+def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
     best_DCF = float('inf')
     best_min_DCF = float('inf')
 
@@ -237,12 +244,13 @@ def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1):
         best_min_DCF_version = float('inf')
 
         for version in ["gaussian", "tied", "naive"]:
-            LLR = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
-            BD, DCF, DCF_min = BD_DCF_minDCF(LLR, LVAL, pi1)
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
+            act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL))
+            min_dcf = minDCF(llrs, LVAL, pi1, Cfn, Cfp)
 
-            if DCF < best_DCF_version:
-                best_DCF_version = DCF
-                best_min_DCF_version = DCF_min
+            if act_dcf < best_DCF_version:
+                best_DCF_version = act_dcf
+                best_min_DCF_version = min_dcf
 
         if best_DCF_version < best_DCF:
             best_DCF = best_DCF_version
@@ -301,58 +309,158 @@ def train_logreg(DTR, LTR, l, pi_T = 0, weighted=False):
         result = opt.fmin_l_bfgs_b(logreg_obj, x0, args=(DTR, LTR, l), approx_grad=False)
     return result[0], result[1]
 
-def llrScores(D, w, b, pi_emp):
+def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
     scores = np.dot(w.T, D) + b
     llr_scores = scores - np.log(pi_emp / (1 - pi_emp))
-    return llr_scores
+    predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
+    return predictions, llr_scores
 
-def lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, weighted=False):
+def lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, weighted=False, Cfn=1, Cfp=1):
     actual_dcf_values = []
     min_dcf_values = []
 
     for l in lambdas:
-            optimal_params, _ = train_logreg(DTR, LTR, l, pi_T, weighted)
-            w_opt = optimal_params[:-1]
-            b_opt = optimal_params[-1]
-            
-            llr_scores = llrScores(DVAL, w_opt, b_opt, pi_emp)
-            actual_dcf = normDCF(pi_T, 1, 1, confMatrix(optBayesDecisions(llr_scores, pi_T, 1, 1), LVAL).T)  # Assuming Cfn = Cfp = 1
-            min_dcf = minDCF(llr_scores, LVAL, pi_T, 1, 1)  # Assuming Cfn = Cfp = 1
-            
-            actual_dcf_values.append(actual_dcf)
-            min_dcf_values.append(min_dcf)
-            # Save model parameters and validation scores
-            model_params = {'weights': w_opt, 'bias': b_opt}
-            save_model(model, f'model_lambda_{l:.1e}.pkl', model_params, llr_scores)
+        optimal_params, _ = train_logreg(DTR, LTR, l, pi_T, weighted)
+        w_opt = optimal_params[:-1]
+        b_opt = optimal_params[-1]
+        
+        predictions, llr_scores = llrScores(DVAL, w_opt, b_opt, pi_emp, pi_T, Cfn, Cfp)
+        actual_dcf = normDCF(pi_T, Cfn, Cfp, confMatrix(predictions, LVAL))
+        min_dcf = minDCF(llr_scores, LVAL, pi_T, Cfn, Cfp)
+        
+        actual_dcf_values.append(actual_dcf)
+        min_dcf_values.append(min_dcf)
+        # Save model parameters and validation scores
+        model_params = {'weights': w_opt, 'bias': b_opt}
+        save_model(model, f'model_lambda_{l:.1e}.pkl', model_params, llr_scores)
 
     return actual_dcf_values, min_dcf_values
 
 def expand_features(X):
     n_samples, n_features = X.shape
-    expanded_features = [X]  # Start with the original features
+    expanded_features = [X]
     
-    # Add quadratic terms
     for i in range(n_features):
         expanded_features.append(X[:, i:i+1] ** 2)
     
-    # Add interaction terms
     for i in range(n_features):
         for j in range(i+1, n_features):
             expanded_features.append(X[:, i:i+1] * X[:, j:j+1])
     
     return np.hstack(expanded_features)
 
-def bayesError(llr, labels, eff_prior_log_odds, Cfn = 1, Cfp = 1):
-    pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
-    dcf = []
-    mindcf = []
+def dual_objective(alpha, Hc):
+    return 0.5 * np.dot(alpha.T, np.dot(Hc, alpha)) - np.sum(alpha.T)
 
-    for pi_eff_value in pi_eff:
-        BD, dcf_value, min_dcf_value = BD_DCF_minDCF(llr, labels, pi_eff_value, Cfn, Cfp)
-        dcf.append(dcf_value)
-        mindcf.append(min_dcf_value)
+def dual_gradient(alpha, Hc):
+    return np.dot(Hc, alpha) - np.ones_like(alpha)
 
-    return dcf, mindcf
+def predictLinearSVM(DVAL, w, b, K):
+    scores = np.dot(w.T, DVAL) + b*K
+    return np.where(scores > 0, True, False), scores
+
+def trainLinearSVM(DTR, LTR, Hc, C):
+    n = DTR.shape[1]
+    bounds = [(0, C) for _ in range(n)]
+    alpha_0 = np.zeros(n)
+    
+    alpha_star, _, _ = opt.fmin_l_bfgs_b(dual_objective, alpha_0, fprime=dual_gradient, bounds=bounds, args=(Hc,), factr=1.0)
+    
+    w_star = np.sum((alpha_star * LTR) * DTR, axis=1)
+    w = w_star[:-1]
+    b = w_star[-1]
+    return w, b
+
+def sampleScorePolyKSVM(DTR, LTR, alpha_star, x, d, c, xi):
+    score = 0
+    for i in range(DTR.shape[1]):
+        score += alpha_star[i] * LTR[i] * ((np.dot(DTR[:, i].T, x) + c) ** d + xi)
+    return score
+
+def predictPolyKSVM(DTR, LTR, alpha_star, DVAL, d, c, xi):
+    scores = np.array([sampleScorePolyKSVM(DTR, LTR, alpha_star, DVAL[:, i], d, c, xi) for i in range(DVAL.shape[1])])
+    return np.where(scores > 0, True, False), scores
+
+def trainPolyKSVM(DTR, Hc, C):
+    n = DTR.shape[1]
+    bounds = [(0, C) for _ in range(n)]
+    alpha_0 = np.zeros(n)
+    
+    alpha_star, _, _ = opt.fmin_l_bfgs_b(dual_objective, alpha_0, fprime=dual_gradient, bounds=bounds, args=(Hc,), factr=1.0)
+    return alpha_star
+
+def matrixPolyK(D, L, d, c, xi):
+    n = D.shape[1]
+    Hc = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            Hc[i, j] = L[i] * L[j] * ((np.dot(D[:, i].T, D[:, j]) + c) ** d + xi)
+    return Hc
+
+def sampleScoreRBFKSVM(DTR, LTR, alpha_star, x, gamma, xi):
+    score = 0
+    for i in range(DTR.shape[1]):
+        diff = DTR[:, i] - x
+        score += alpha_star[i] * LTR[i] * (np.exp(-gamma * np.dot(diff.T, diff)) + xi)
+    return score
+
+def predictRBFKSVM(DTR, LTR, alpha_star, DVAL, gamma, xi):
+    scores = np.array([sampleScoreRBFKSVM(DTR, LTR, alpha_star, DVAL[:, i], gamma, xi) for i in range(DVAL.shape[1])])
+    return np.where(scores > 0, True, False), scores
+
+def trainRBFKSVM(DTR, Hc, C):
+    n = DTR.shape[1]
+    bounds = [(0, C) for _ in range(n)]
+    alpha_0TR = np.zeros(n)
+    
+    alpha_starTR, _, _ = opt.fmin_l_bfgs_b(dual_objective, alpha_0TR, fprime=dual_gradient, bounds=bounds, args=(Hc,), factr=1.0)
+    return alpha_starTR
+
+def matrixRBFK(D, L, gamma, xi):
+    n = D.shape[1]
+    Hc = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            diff = D[:, i] - D[:, j]
+            Hc[i, j] = L[i] * L[j] * (np.exp(-gamma * np.dot(diff.T, diff)) + xi)
+    return Hc
+
+def SVM(DTR, LTR, DVAL, LVAL, C_values, kernel_version, params, pi1=0.1, xi=0, K=1.0):
+    min_dcf_values = []
+    act_dcf_values = []
+    d, c, gamma = 0, 0, 0
+
+    LTR = np.where(LTR == True, 1, -1)
+
+    if kernel_version == 'poly':
+        d, c = params
+        Hc = matrixPolyK(DTR, LTR, d, c, xi)
+    elif kernel_version == 'rbf':
+        gamma = params
+        Hc = matrixRBFK(DTR, LTR, gamma, xi)
+    elif kernel_version == 'linear':
+        DTR_ext = np.vstack([DTR, np.ones((1, DTR.shape[1])) * K])
+        Hc = np.dot(DTR_ext.T * LTR[:, None], (DTR_ext.T * LTR[:, None]).T)
+    
+    for C in C_values:
+        predictions, scores = [], []
+        if kernel_version == 'linear':
+            w, b = trainLinearSVM(DTR_ext, LTR, Hc, C)
+            predictions, scores = predictLinearSVM(DVAL, w, b, K)
+        elif kernel_version == 'poly':
+            alpha_star = trainPolyKSVM(DTR, Hc, C)
+            predictions, scores = predictPolyKSVM(DTR, LTR, alpha_star, DVAL, d, c, xi)
+        elif kernel_version == 'rbf':
+            alpha_star = trainRBFKSVM(DTR, Hc, C)
+            predictions, scores = predictRBFKSVM(DTR, LTR, alpha_star, DVAL, gamma, xi)
+
+        min_dcf = minDCF(scores, LVAL, pi1, 1, 1)
+        act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(scores, pi1, 1, 1), LVAL))
+        
+        min_dcf_values.append(min_dcf)
+        act_dcf_values.append(act_dcf)
+    
+    return act_dcf_values, min_dcf_values
 
 def plot_hist(D, L, fname="", flag_lda=False):
     plt.rc('font', size=16)
@@ -493,11 +601,29 @@ def plotDCFsvslambda(lambdas, normdcfs, mindcfs, title):
     plt.savefig(f'plots/dcfs_vs_lambda/{title}.png')
     plt.show()
 
+def eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, C_values, gamma_values):
+    plt.rc('font', size=16)
+    plt.rc('xtick', labelsize=16)
+    plt.rc('ytick', labelsize=16)
+    plt.figure(figsize=(10, 6))
+    for title, gamma in gamma_values.items():
+        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
+        plt.plot(C_values, act_dcf_values, label=f'Actual DCF (γ: {title})', marker='o')
+        plt.plot(C_values, min_dcf_values, label=f'Minimum DCF (γ: {title})', marker='x')
+    plt.xscale('log', base=10)
+    plt.xlabel('C (log scale)')
+    plt.ylabel('DCF')
+    plt.title(f"DCF and MinDCF vs Lambda (RBF SVM)")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f'plots/dcfs_vs_lambda/RBF.png')
+    plt.show()
+
 def main():
     D, L = load_projectData()
     (DTR, LTR), (DVAL, LVAL) = split_db_2to1(D, L)
 
-    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6")
+    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6, 7")
     choice = int(input('>\t'))
 
     if choice == 1:
@@ -514,20 +640,16 @@ def main():
             stdcls = Dcls.std(1)
 
     elif choice == 2:
-        # Step 1: Apply PCA to the data and analyze its effects
         D_PCA, _ = PCA(D, 6)
         plot_hist(D_PCA, L, 'Dataset (PCA applied)')
 
-        # Step 2: Apply LDA and analyze its effects
         D_LDA, _ = LDA(D, L, [False, True])
         plot_hist(D_LDA, L, 'LDA', True)
 
-        # Step 3: Apply LDA as a classifier
         DTR_LDA, DVAL_LDA = LDA(DTR, LTR, [False, True], DVAL)
         error_rate_lda = errorRateLab3(DVAL_LDA, DTR_LDA, LTR, LVAL)
         error_rate_lda_adjusted = errorRateLab3(DVAL_LDA, DTR_LDA, LTR, LVAL, -0.019)
 
-        # Step 4: Combine PCA and LDA for classification
         for m in range(1, 7):
             DTR_PCA, DVAL_PCA = PCA(DTR, m, DVAL)
             DTR_PCALDA, DVAL_PCALDA = LDA(DTR_PCA, LTR, [False, True], DVAL_PCA)
@@ -537,16 +659,13 @@ def main():
         plot_logdens(D, L)
 
     elif choice == 4:
-        #Apply LDA to the data and analyze its effects
         DTR_LDA, DVAL_LDA = LDA(DTR, LTR, [False, True], DVAL)
         error_rate_lda = errorRateLab3(DVAL_LDA, DTR_LDA, LTR, LVAL)
         
         for version in ["gaussian", "tied", "naive"]:
-            LLR = llr_binary(2, DVAL.shape[1], DTR, LTR, DVAL, version)
-            predictions = np.where(LLR >= 0, True, False)
+            predictions, llrs = llr_binary(2, DVAL.shape[1], DTR, LTR, DVAL, version)
             error_rate = np.sum(predictions != LVAL) / len(LVAL)
         
-        # Extract correlation matrices
         cov_c1 = eval_cov(DTR[:, LTR == False])
         cov_c2 = eval_cov(DTR[:, LTR == True])
         corr_c1 = cov_c1 / (vcol(cov_c1.diagonal()**0.5) * vrow(cov_c1.diagonal()**0.5))
@@ -554,8 +673,7 @@ def main():
 
         DTR_PCA, DVAL_PCA = PCA(DTR, 5, DVAL)
         for version in ["gaussian", "tied", "naive"]:
-            LLR = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
-            predictions = np.where(LLR >= 0, True, False)
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             error_rate = np.sum(predictions != LVAL) / len(LVAL)
 
     elif choice == 5:
@@ -569,18 +687,18 @@ def main():
         for dataset, (DTR_, LTR_, DVAL_, LVAL_) in datasets.items():
             for pi1, Cfn, Cfp in [(0.1, 1.0, 1.0), (0.5, 1.0, 1.0), (0.9, 1.0, 1.0)]:
                 for version in ["gaussian", "tied", "naive"]:
-                    LLR = llr_binary(2, DVAL_.shape[1], DTR_, LTR_, DVAL_, version)
-                    BD, DCF, DCF_min = BD_DCF_minDCF(LLR, LVAL_, pi1, Cfn, Cfp)
+                    predictions, llrs = llr_binary(2, DVAL_.shape[1], DTR_, LTR_, DVAL_, version)
+                    DCF = normDCF(pi1, Cfn, Cfp, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL_))
+                    DCF_min = minDCF(llrs, LVAL_, pi1, Cfn, Cfp)
                     calibration_loss = DCF - DCF_min
 
         best_m, best_DCF, best_min_DCF = bestmbyDCF(DTR, LTR, DVAL, LVAL, 0.1)
         DTR_PCA, DVAL_PCA = PCA(DTR, best_m, DVAL)
         logOddsRange = np.linspace(-4, 4, 50)
 
-        # Compute and plot Bayes error for each model
         for version in ["gaussian", "tied", "naive"]:
-            LLR = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
-            dcf, mindcf = bayesError(LLR, LVAL, logOddsRange)
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
+            dcf, mindcf = pieffvsDCFs(llrs, LVAL, logOddsRange)
             plotBayesError(logOddsRange, dcf, mindcf, version)
             calibration_loss = (np.mean(dcf) - np.mean(mindcf)).round(3)
 
@@ -589,99 +707,30 @@ def main():
         pi_T = 0.1
         pi_emp = np.mean(LTR == 1)
 
-        # Full Dataset - Linear Model
         normDCF_values, minDCF_values = lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, "full")
         plotDCFsvslambda(lambdas, normDCF_values, minDCF_values, "Full Dataset")
 
-        '''
-        Observations:
-        1. Significant differences for different values of λ:
-        - Actual DCF increases significantly with higher λ values, especially above λ = 10^-2.
-        - Minimum DCF remains constant around ~0.1 for all λ values.
-        2. Effect of regularization coefficient:
-        - Actual DCF:
-            - Sensitive to λ. Low values of λ result in stable Actual DCF (~0.4).
-            - High λ values lead to a significant increase in Actual DCF, up to ~1 for λ around 10^0.
-        - Minimum DCF:
-            - Not affected by different λ values, stays low (~0.1) for all λ values.
-        3. Discrepancy between Actual DCF and Minimum DCF:
-        - Suggests the model may not be well-calibrated for all λ values.
-        - Actual DCF is with a fixed threshold, while Minimum DCF is optimized for specific thresholds.
-        4. Choosing the regularization coefficient:
-        - High λ leads to over-regularization, degrading performance (higher Actual DCF).
-        - Low λ may not provide enough regularization, risking overfitting.
-        - Intermediate λ values (around 10^-3 or 10^-2) balance regularization and performance.
-        5. Model implications:
-        - Calibration techniques (e.g., Platt scaling) could reduce the gap between Actual DCF and Minimum DCF.
-        '''
-
-        # Reduced Training Samples - Linear Model
         reduced_DTR = DTR[:, ::50]
         reduced_LTR = LTR[::50]
         rednormDCF_values, redminDCF_values = lambdavsDCFs(reduced_DTR, reduced_LTR, DVAL, LVAL, lambdas, pi_T, np.mean(reduced_LTR == 1), "reduced")
         plotDCFsvslambda(lambdas, rednormDCF_values, redminDCF_values, "Reduced Training Samples")
-        '''
-        Observations with Reduced Training Samples:
-        1. Effect of Reduced Training Samples:
-        - Model is more prone to overfitting with low λ values.
-        - Higher λ values reduce overfitting, leading to more stable actual DCF.
-        2. Actual DCF:
-        - Shows more variation with different λ values when using fewer training samples.
-        - Low λ values may increase actual DCF due to overfitting.
-        - High λ values may stabilize or slightly increase actual DCF due to underfitting.
-        3. Minimum DCF:
-        - Remains relatively stable, representing the best possible performance with optimized thresholds.
-        - Discrepancy between actual DCF and minimum DCF highlights the impact of regularization on model calibration.
-        '''
 
         wnormDCF_values, wminDCF_values = lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_T, "weighted", weighted=True)
         plotDCFsvslambda(lambdas, wnormDCF_values, wminDCF_values, "Prior-Weighted Linear Model")
-        '''
-        Observations with prior-weighted logistic regression:
-        For the given task, if the class distribution is balanced or the target priors are not significantly different from the observed distribution, 
-        the standard logistic regression model should suffice.
-        In this specific application, where the prior-weighted version appears almost identical to the non-weighted version, 
-        it suggests that the class distribution might be balanced or that the priors do not significantly differ. 
-        Therefore, the added complexity of using the prior-weighted model may not provide substantial benefits in this case.
-        '''
 
-        # Full Dataset - Quadratic Model
         expanded_DTR = expand_features(DTR.T).T
         expanded_DVAL = expand_features(DVAL.T).T
         qnormDCF_values, qminDCF_values = lambdavsDCFs(expanded_DTR, LTR, expanded_DVAL, LVAL, lambdas, pi_T, pi_emp, "quadratic")
         plotDCFsvslambda(lambdas, qnormDCF_values, qminDCF_values, "Quadratic Model")
-        '''
-        Observations for Quadratic Logistic Regression:
-        1. Significant differences for different values of λ:
-        - Actual DCF increases significantly for λ > 10^-2.
-        - Minimum DCF remains relatively stable across different λ values, indicating consistent theoretical best performance.
-        2. Effect of regularization coefficient:
-        - Actual DCF:
-            - Stable and low (~0.3) for small λ values (10^-4 to 10^-2).
-            - Increases rapidly for λ > 10^-2, indicating over-regularization and underfitting.
-        - Minimum DCF:
-            - Consistently low (~0.1) with slight increase for higher λ values, showing minimal variation.
-        3. Calibration discrepancy:
-        - The gap between Actual DCF and Minimum DCF suggests potential calibration issues.
-        - Actual DCF with a fixed threshold shows higher values, while Minimum DCF indicates optimal performance with specific thresholds.
-        4. Choosing the regularization coefficient:
-        - Optimal λ values are around 10^-3 to 10^-2, balancing between overfitting and underfitting.
-        - High λ values degrade performance due to excessive regularization.
-        5. Model implications:
-        - Regularization is essential for preventing overfitting but excessive regularization leads to underfitting.
-        - Calibration techniques (e.g., Platt scaling) could improve score calibration and reduce the discrepancy between Actual DCF and Minimum DCF.
-        '''
-        # Analyze the effects of centering on the model results
+
         DTR_centered, DVAL_centered = centerData(DTR, DVAL)
         centnormDCF_values, centminDCF_values = lambdavsDCFs(DTR_centered, LTR, DVAL_centered, LVAL, lambdas, pi_T, pi_emp, "centered")
         plotDCFsvslambda(lambdas, centnormDCF_values, centminDCF_values, "Centered Data")
 
-        # Optionally, analyze the effects of Z-normalization on the model results
         DTR_zNorm, DVAL_zNorm = zNormData(DTR, DVAL)
         znormDCF_values, zminDCF_values = lambdavsDCFs(DTR_zNorm, LTR, DVAL_zNorm, LVAL, lambdas, pi_T, pi_emp, "znorm")
         plotDCFsvslambda(lambdas, znormDCF_values, zminDCF_values, "Z-normalized Data")
 
-        # Optionally, analyze the effects of PCA on the model results (m = 5)
         DTR_PCA, DVAL_PCA = PCA(DTR, 5, DVAL)
         PCAnormDCF_values, PCAminDCF_values = lambdavsDCFs(DTR_PCA, LTR, DVAL_PCA, LVAL, lambdas, pi_T, pi_emp, "pca")
         plotDCFsvslambda(lambdas, PCAnormDCF_values, PCAminDCF_values, "PCA Data")
@@ -696,36 +745,28 @@ def main():
             "PCA Data - Linear Model": PCAminDCF_values
         }
 
-        # Print or plot the comparison of minDCF values
-        for model, min_dcf in models_minDCF.items():
-            print(f"{model}: {min(min_dcf).round(3)}")
-        '''
-        Summary of Minimum DCF Results and Analysis:
+        #for model, min_dcf in models_minDCF.items():
+        #    print(f"{model}: {min(min_dcf).round(3)}")
 
-        1. Best Model(s):
-        - The "Full Dataset - Quadratic Model" achieves the best results with a minimum DCF value of 0.10.
+    elif choice == 7:
+        C_values = np.logspace(-5, 0, 11)
+        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'linear', None)
+        plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, "Linear SVM")
+        
+        DTR_centered, DVAL_centered = centerData(DTR, DVAL)
+        min_dcf_values, act_dcf_values = SVM(DTR_centered, LTR, DVAL_centered, LVAL, C_values, 'linear', None)
+        plotDCFsvslambda(C_values, min_dcf_values, act_dcf_values, "Centered Linear SVM")
 
-        2. Separation Rules and Distribution Assumptions:
-        - Quadratic Model:
-            - Assumes that the relationship between features and classes can be captured by quadratic decision boundaries.
-            - Includes interaction terms and squared features to capture more complex patterns.
-        - Linear Models:
-            - Assume a linear decision boundary, which may not be sufficient for non-linear relationships in the data.
-            - Performed worse compared to the quadratic model.
+        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'poly', [2, 1])
+        plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, "Polynomial SVM")
 
-        3. Relation to Dataset Features:
-        - Feature Linearity:
-            - The superior performance of the quadratic model suggests the presence of non-linear relationships in the dataset.
-        - Feature Scaling:
-            - Z-normalized data performed better than the unnormalized linear model, indicating the importance of feature scaling.
-        - Dimensionality Reduction:
-            - PCA model did not perform as well, suggesting that dimensionality reduction might not capture the most discriminative features when reduced to only 5 components.
-
-        Conclusion:
-        - The quadratic model with the full dataset achieves the best results, indicating non-linear relationships in the data.
-        - Feature scaling (Z-normalization) improves performance, highlighting the importance of preprocessing.
-        - Dimensionality reduction using PCA may not always yield better results, depending on the data and number of components retained.
-        '''
+        gamma_values = {
+            "np.exp(-4)": np.exp(-4),
+            "np.exp(-3)": np.exp(-3),
+            "np.exp(-2)": np.exp(-2),
+            "np.exp(-1)": np.exp(-1)
+            }
+        eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, np.logspace(-3, 2, 11), gamma_values)
 
     else:
         print('Wrong choice')
