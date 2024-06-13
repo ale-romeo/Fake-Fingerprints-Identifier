@@ -42,15 +42,25 @@ The dataset used in this project consists of 6-dimensional feature vectors. The 
 ## Project Structure
 
 ML-Project/
+
 │
+
 ├── Project/
+
 │ ├── trainData.txt # Training dataset
+
 │ ├── project.py # Main project code
+
 │ ├── models/ # Saved models
+
 │ ├── plots/ # Saved plots
+
 │
+
 ├── README.md # Project README file
+
 ├── Report.tex # LaTeX report
+
 
 ## Requirements
 

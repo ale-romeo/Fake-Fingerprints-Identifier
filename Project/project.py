@@ -2,8 +2,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy.linalg
 import scipy.optimize as opt
+from scipy.special import logsumexp
 import pickle
 import os
+import pandas as pd
 
 def mcol(v):
     return v.reshape((v.size, 1))
@@ -43,8 +45,8 @@ def split_db_2to1(D, L, seed=0):
     LVAL = L[idxTest]
     return (DTR, LTR), (DVAL, LVAL)
 
-def save_model(directory, filename, model_params, validation_scores):
-    directory = f"models/{directory}"
+def save_model(classifier, model, filename, model_params, validation_scores):
+    directory = f"models/{classifier}/{model}"
     if not os.path.exists(directory):
         os.makedirs(directory)
     filepath = os.path.join(directory, filename)
@@ -52,9 +54,8 @@ def save_model(directory, filename, model_params, validation_scores):
     with open(filepath, 'wb') as file:
         pickle.dump(data, file)
 
-def load_model(directory, filename):
-    directory = f"models/{directory}"
-    filepath = os.path.join(directory, filename)
+def load_model(classifier, model, filename):
+    filepath = f"models/{classifier}/{model}/{filename}"
     with open(filepath, 'rb') as file:
         data = pickle.load(file)
     return data
@@ -315,9 +316,21 @@ def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
     predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
     return predictions, llr_scores
 
-def lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, weighted=False, Cfn=1, Cfp=1):
+def LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, Cfn=1, Cfp=1):
     actual_dcf_values = []
     min_dcf_values = []
+    weighted = True if model == 'weighted' else False
+    if model == 'reduced':
+        DTR, LTR = DTR[:, ::50], LTR[::50]
+    if model == 'quadratic':
+        DTR = expand_features(DTR.T).T
+        DVAL = expand_features(DVAL.T).T
+    if model == 'centered':
+        DTR, DVAL = centerData(DTR, DVAL)
+    if model == 'znorm':
+        DTR, DVAL = zNormData(DTR, DVAL)
+    if model == 'pca':
+        DTR, DVAL = PCA(DTR, 5, DVAL)
 
     for l in lambdas:
         optimal_params, _ = train_logreg(DTR, LTR, l, pi_T, weighted)
@@ -331,8 +344,11 @@ def lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, weighted=Fa
         actual_dcf_values.append(actual_dcf)
         min_dcf_values.append(min_dcf)
         # Save model parameters and validation scores
-        model_params = {'weights': w_opt, 'bias': b_opt}
-        save_model(model, f'model_lambda_{l:.1e}.pkl', model_params, llr_scores)
+        if min_dcf == min(min_dcf_values):
+            best_model_params = {'weights': w_opt, 'bias': b_opt}
+            best_model_llr_scores = llr_scores
+        
+    save_model('logreg', model, 'best_model.pkl', best_model_params, best_model_llr_scores)
 
     return actual_dcf_values, min_dcf_values
 
@@ -435,16 +451,18 @@ def SVM(DTR, LTR, DVAL, LVAL, C_values, kernel_version, params, pi1=0.1, xi=0, K
     if kernel_version == 'poly':
         d, c = params
         Hc = matrixPolyK(DTR, LTR, d, c, xi)
-    elif kernel_version == 'rbf':
+    if kernel_version == 'rbf':
         gamma = params
         Hc = matrixRBFK(DTR, LTR, gamma, xi)
-    elif kernel_version == 'linear':
+    if kernel_version == 'centered':
+        DTR, DVAL = centerData(DTR, DVAL)
+    if kernel_version == 'linear' or kernel_version == 'centered':
         DTR_ext = np.vstack([DTR, np.ones((1, DTR.shape[1])) * K])
         Hc = np.dot(DTR_ext.T * LTR[:, None], (DTR_ext.T * LTR[:, None]).T)
     
     for C in C_values:
         predictions, scores = [], []
-        if kernel_version == 'linear':
+        if kernel_version == 'linear' or kernel_version == 'centered':
             w, b = trainLinearSVM(DTR_ext, LTR, Hc, C)
             predictions, scores = predictLinearSVM(DVAL, w, b, K)
         elif kernel_version == 'poly':
@@ -459,8 +477,203 @@ def SVM(DTR, LTR, DVAL, LVAL, C_values, kernel_version, params, pi1=0.1, xi=0, K
         
         min_dcf_values.append(min_dcf)
         act_dcf_values.append(act_dcf)
-    
+        
+        if min_dcf == min(min_dcf_values):
+            best_model_params = {'d': d, 'c': c} if kernel_version == 'poly' else {'gamma': gamma} if kernel_version == 'rbf' else None
+            best_model_llr_scores = scores
+        
+    save_model('svm', kernel_version, 'best_model.pkl', best_model_params, best_model_llr_scores)
+
     return act_dcf_values, min_dcf_values
+
+def apply_eigenvalue_constraint(cov, psi):
+    U, s, _ = np.linalg.svd(cov)
+    s[s < psi] = psi
+    covNew = np.dot(U, mcol(s) * U.T)
+    return covNew
+
+def logpdf_GMM(X, gmm):
+    M = len(gmm)
+    N = X.shape[1]
+    S = np.zeros((M, N))
+    
+    for g in range(M):
+        w, mu, C = gmm[g]
+        S[g, :] = logpdf_GAU_ND(X, mcol(mu), C) + np.log(w)
+    
+    logdens = logsumexp(S, axis=0)
+    return logdens
+
+def llr_GMMs(X, gmm1, gmm2):
+    log_dens1 = logpdf_GMM(X, gmm1)
+    log_dens2 = logpdf_GMM(X, gmm2)
+    return log_dens1 - log_dens2
+
+def EM_GMM(X, gmm_init, version='full', tol=1e-6, max_iter=100, psi=1e-2):
+    N = X.shape[1]
+    M = len(gmm_init)
+    gmm = gmm_init.copy()
+    prev_log_likelihood = -np.inf
+
+    for iteration in range(max_iter):
+        # E-step
+        S = np.zeros((M, N))
+        for g in range(M):
+            w, mu, C = gmm[g]
+            S[g, :] = logpdf_GAU_ND(X, mcol(mu), C) + np.log(w)
+
+        log_marginals = logsumexp(S, axis=0)
+        log_responsibilities = S - log_marginals
+        responsibilities = np.exp(log_responsibilities)
+
+        # M-step
+        Zg = np.sum(responsibilities, axis=1)
+        Fg = np.dot(responsibilities, X.T)
+        Sg = np.zeros((M, X.shape[0], X.shape[0]))
+
+        for g in range(M):
+            for i in range(N):
+                xi = X[:, i].reshape(-1, 1)
+                Sg[g] += responsibilities[g, i] * np.dot(xi, xi.T)
+
+        if version == 'tied':
+            overall_Sigma_new = np.zeros((X.shape[0], X.shape[0]))
+            for g in range(M):
+                mu_new = Fg[g] / Zg[g]
+                Sigma_new = Sg[g] / Zg[g] - np.dot(mu_new.reshape(-1, 1), mu_new.reshape(1, -1))
+                overall_Sigma_new += Zg[g] * Sigma_new
+                gmm[g] = (Zg[g] / N, mu_new, Sigma_new)
+            overall_Sigma_new /= N
+            overall_Sigma_new = apply_eigenvalue_constraint(overall_Sigma_new, psi)
+            for g in range(M):
+                w, mu, _ = gmm[g]
+                gmm[g] = (w, mu, overall_Sigma_new)
+        else:
+            for g in range(M):
+                mu_new = Fg[g] / Zg[g]
+                Sigma_new = Sg[g] / Zg[g] - np.dot(mu_new.reshape(-1, 1), mu_new.reshape(1, -1))
+                if version == 'diagonal':
+                    Sigma_new = np.diag(np.diag(Sigma_new))
+                Sigma_new = apply_eigenvalue_constraint(Sigma_new, psi)
+                w_new = Zg[g] / N
+                gmm[g] = (w_new, mu_new, Sigma_new)
+
+        log_likelihood = np.sum(log_marginals) / N
+        if log_likelihood - prev_log_likelihood < tol:
+            break
+
+        prev_log_likelihood = log_likelihood
+
+    return gmm, log_likelihood
+
+def LBG_GMM(X, max_components=4, version='full', alpha=0.1):
+    gmm = [(1.0, eval_mu(X), eval_cov(X))]
+    while len(gmm) < max_components:
+        new_gmm = []
+        for w, mu, C in gmm:
+            U, s, _ = np.linalg.svd(C)
+            d = U[:, 0] * np.sqrt(s[0]) * alpha
+            
+            new_gmm.append((w / 2, mu - d, C))
+            new_gmm.append((w / 2, mu + d, C))
+        
+        gmm, _ = EM_GMM(X, new_gmm, version=version)
+    return gmm
+
+def train_gmms(DTR, LTR, first_comps, second_comps, version='full'):
+    class_labels = np.unique(LTR)
+    gmms = {}
+    for cls in class_labels:
+        DTR_cls = DTR[:, LTR == cls]
+        if cls == False:
+            gmms[cls] = LBG_GMM(DTR_cls, max_components=first_comps, version=version)
+        else:
+            gmms[cls] = LBG_GMM(DTR_cls, max_components=second_comps, version=version)
+    return gmms
+
+def GMM(DTR, LTR, DVAL, LVAL, model, n_comps=[1, 2, 4], pi=0.1, Cfn=1, Cfp=1):
+    act_dcf_values = []
+    min_dcf_values = []
+
+    for first_n_comp in n_comps:
+        for second_n_comp in n_comps:
+            gmms = train_gmms(DTR, LTR, first_n_comp, second_n_comp, model)
+            llrs = llr_GMMs(DVAL, gmms[True], gmms[False])
+            act_dcf = normDCF(pi, Cfn, Cfp, confMatrix(optBayesDecisions(llrs, pi, Cfn, Cfp), LVAL))
+            min_dcf = minDCF(llrs, LVAL, pi, Cfn, Cfp)
+
+            act_dcf_values.append(act_dcf)
+            min_dcf_values.append(min_dcf)
+
+            if min_dcf == min(min_dcf_values):
+                best_comp = {'first_class_comps': first_n_comp, 'second_class_comps': second_n_comp}
+                best_llrs = llrs
+
+    save_model('gmm', model, 'best_model.pkl', best_comp, best_llrs)
+
+    return act_dcf_values, min_dcf_values
+
+def bestClassifier(DTR, LTR, DVAL, LVAL, pi1):
+    bestClassifier = {"GMM": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
+                      "LogReg": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
+                      "SVM": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}
+                      }
+    lambdas = np.logspace(-3, 2, 11)
+
+    for classifier in ['LogReg', 'SVM', 'GMM']:
+        print(f"Training {classifier} classifier...")
+        if classifier == 'LogReg':
+            for model in ['reduced', 'quadratic', 'centered', 'znorm', 'pca']:
+                act_dcf_values, min_dcf_values = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi1, pi1, model)
+                if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
+                    bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+        elif classifier == 'SVM':
+            for model in ['linear', 'centered', 'poly', 'rbf']:
+                print(f"Training {model} SVM...")
+                if model == 'linear' or model == 'centered':
+                    act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=None, pi1=pi1)
+                    if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
+                        bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                elif model == 'poly':
+                    act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=[2, 1], pi1=pi1)
+                    if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
+                        bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                elif model == 'rbf':
+                    for gamma in [np.exp(-4), np.exp(-3), np.exp(-2), np.exp(-1)]:
+                        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, lambdas, model, gamma, pi1)
+                        if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
+                            bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+        else:
+            for model in ['full', 'diagonal', 'tied']:
+                print(f"Training {model} GMM...")
+                act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi1)
+                if min(min_dcf_values) < bestClassifier['GMM']["MinDCF"]:
+                    bestClassifier['GMM'] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+
+        print(bestClassifier)
+
+    return bestClassifier
+    
+def pieffvsDCFsByClassifier(LVAL, eff_prior_log_odds, classifier, model, Cfn=1, Cfp=1):
+    pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
+    actual_dcf_values = []
+    min_dcf_values = []
+
+    for pi_eff_value in pi_eff:
+        if classifier == 'LogReg':
+            data = load_model('logreg', model, 'best_model.pkl')
+        elif classifier == 'SVM':
+            data = load_model('svm', model, 'best_model.pkl')
+        else:
+            data = load_model('gmm', model, 'best_model.pkl')
+        llr = data['validation_scores']
+        act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), LVAL))
+        min_dcf = minDCF(llr, LVAL, pi_eff_value, Cfn, Cfp)
+
+        actual_dcf_values.append(act_dcf)
+        min_dcf_values.append(min_dcf)
+
+    return actual_dcf_values, min_dcf_values, data['model_params']
 
 def plot_hist(D, L, fname="", flag_lda=False):
     plt.rc('font', size=16)
@@ -623,7 +836,7 @@ def main():
     D, L = load_projectData()
     (DTR, LTR), (DVAL, LVAL) = split_db_2to1(D, L)
 
-    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6, 7")
+    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6, 7, 8")
     choice = int(input('>\t'))
 
     if choice == 1:
@@ -707,58 +920,31 @@ def main():
         pi_T = 0.1
         pi_emp = np.mean(LTR == 1)
 
-        normDCF_values, minDCF_values = lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, "full")
-        plotDCFsvslambda(lambdas, normDCF_values, minDCF_values, "Full Dataset")
-
-        reduced_DTR = DTR[:, ::50]
-        reduced_LTR = LTR[::50]
-        rednormDCF_values, redminDCF_values = lambdavsDCFs(reduced_DTR, reduced_LTR, DVAL, LVAL, lambdas, pi_T, np.mean(reduced_LTR == 1), "reduced")
-        plotDCFsvslambda(lambdas, rednormDCF_values, redminDCF_values, "Reduced Training Samples")
-
-        wnormDCF_values, wminDCF_values = lambdavsDCFs(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_T, "weighted", weighted=True)
-        plotDCFsvslambda(lambdas, wnormDCF_values, wminDCF_values, "Prior-Weighted Linear Model")
-
-        expanded_DTR = expand_features(DTR.T).T
-        expanded_DVAL = expand_features(DVAL.T).T
-        qnormDCF_values, qminDCF_values = lambdavsDCFs(expanded_DTR, LTR, expanded_DVAL, LVAL, lambdas, pi_T, pi_emp, "quadratic")
-        plotDCFsvslambda(lambdas, qnormDCF_values, qminDCF_values, "Quadratic Model")
-
-        DTR_centered, DVAL_centered = centerData(DTR, DVAL)
-        centnormDCF_values, centminDCF_values = lambdavsDCFs(DTR_centered, LTR, DVAL_centered, LVAL, lambdas, pi_T, pi_emp, "centered")
-        plotDCFsvslambda(lambdas, centnormDCF_values, centminDCF_values, "Centered Data")
-
-        DTR_zNorm, DVAL_zNorm = zNormData(DTR, DVAL)
-        znormDCF_values, zminDCF_values = lambdavsDCFs(DTR_zNorm, LTR, DVAL_zNorm, LVAL, lambdas, pi_T, pi_emp, "znorm")
-        plotDCFsvslambda(lambdas, znormDCF_values, zminDCF_values, "Z-normalized Data")
-
-        DTR_PCA, DVAL_PCA = PCA(DTR, 5, DVAL)
-        PCAnormDCF_values, PCAminDCF_values = lambdavsDCFs(DTR_PCA, LTR, DVAL_PCA, LVAL, lambdas, pi_T, pi_emp, "pca")
-        plotDCFsvslambda(lambdas, PCAnormDCF_values, PCAminDCF_values, "PCA Data")
-
-        models_minDCF = {
-            "Full Dataset - Linear Model": minDCF_values,
-            "Reduced Training Samples - Linear Model": redminDCF_values,
-            "Full Dataset - Prior-Weighted Linear Model": wminDCF_values,
-            "Full Dataset - Quadratic Model": qminDCF_values,
-            "Centered Data - Linear Model": centminDCF_values,
-            "Z-normalized Data - Linear Model": zminDCF_values,
-            "PCA Data - Linear Model": PCAminDCF_values
+        models = {
+            "full": "Full Dataset",
+            "reduced": "Reduced Training Samples",
+            "weighted": "Prior-Weighted Linear Model",
+            "quadratic": "Quadratic Model",
+            "centered": "Centered Data",
+            "znorm": "Z-normalized Data",
+            "pca": "PCA Data"
         }
 
-        #for model, min_dcf in models_minDCF.items():
-        #    print(f"{model}: {min(min_dcf).round(3)}")
+        for model, title in models.items():
+            normDCF_values, minDCF_values = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model)
+            plotDCFsvslambda(lambdas, normDCF_values, minDCF_values, title)
 
     elif choice == 7:
         C_values = np.logspace(-5, 0, 11)
-        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'linear', None)
-        plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, "Linear SVM")
-        
-        DTR_centered, DVAL_centered = centerData(DTR, DVAL)
-        min_dcf_values, act_dcf_values = SVM(DTR_centered, LTR, DVAL_centered, LVAL, C_values, 'linear', None)
-        plotDCFsvslambda(C_values, min_dcf_values, act_dcf_values, "Centered Linear SVM")
+        models = {
+            "linear": ["Linear SVM", None],
+            "centered": ["Centered Data SVM", None],
+            "poly": ["Polynomial SVM", [2, 1]]
+        }
 
-        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'poly', [2, 1])
-        plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, "Polynomial SVM")
+        for model, params in models.items():
+            act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, model, params[1])
+            plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, params[0])
 
         gamma_values = {
             "np.exp(-4)": np.exp(-4),
@@ -768,6 +954,23 @@ def main():
             }
         eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, np.logspace(-3, 2, 11), gamma_values)
 
+    elif choice == 8:
+        pi_t = 0.1
+        C_values = np.logspace(-5, 0, 11)
+        logOddsRange = np.linspace(-4, 4, 50)
+        
+        for model in ["full", "diagonal"]:
+            act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi_t)
+            plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, model)
+            
+        bestClassifiers = bestClassifier(DTR, LTR, DVAL, LVAL, pi_t)
+        
+        for classifier, data in bestClassifiers.items():
+            act_dcf_values, min_dcf_values, model_params = pieffvsDCFsByClassifier(LVAL, logOddsRange, classifier, data["Classifier Params"])
+            n_comp1, n_comp2 = model_params["first_class_comps"], model_params["second_class_comps"]
+            plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
+
+        
     else:
         print('Wrong choice')
 
