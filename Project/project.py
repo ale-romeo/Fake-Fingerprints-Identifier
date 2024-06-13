@@ -169,6 +169,10 @@ def llr_binary(num_classes, num_samples, DTR, LTR, DTE, version):
     predictions = np.where(llrs >= 0, True, False)
     return predictions, llrs
 
+    llrs = logS[1] - logS[0]
+    predictions = np.where(llrs >= 0, True, False)
+    return predictions, llrs
+
 def errorRateLab3(DVAL_lda, DTR_lda, LTR, LVAL, threshold=0):
     if threshold == 0:
         threshold = (DTR_lda[0, LTR==False].mean() + DTR_lda[0, LTR==True].mean()) / 2.0
@@ -185,9 +189,14 @@ def errorRateLab3(DVAL_lda, DTR_lda, LTR, LVAL, threshold=0):
 def optBayesDecisions(llr, pi1, Cfn, Cfp):
     threshold = -np.log(pi1 * Cfn / ((1 - pi1) * Cfp))
     decisions = np.where(llr > threshold, True, False)
+    decisions = np.where(llr > threshold, True, False)
     return decisions
 
 def confMatrix(predictions, labels):
+    TP = np.sum((predictions == True) & (labels == True))
+    TN = np.sum((predictions == False) & (labels == False))
+    FP = np.sum((predictions == True) & (labels == False))
+    FN = np.sum((predictions == False) & (labels == True))
     TP = np.sum((predictions == True) & (labels == True))
     TN = np.sum((predictions == False) & (labels == False))
     FP = np.sum((predictions == True) & (labels == False))
@@ -196,6 +205,8 @@ def confMatrix(predictions, labels):
     return conf_matrix
 
 def bayesRisk(pi1, Cfn, Cfp, conf_matrix):
+    Pfn = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])
+    Pfp = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])
     Pfn = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])
     Pfp = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])
     B = pi1 * Cfn * Pfn + (1 - pi1) * Cfp * Pfp
@@ -212,6 +223,8 @@ def minDCF(llr, labels, pi1, Cfn, Cfp):
     thresholds = np.concatenate(([-np.inf], thresholds, [np.inf]))  # Aggiungi -∞ e +∞
     
     min_dcf = float('inf')
+    for threshold in thresholds:
+        decisions = np.where(llr > threshold, True, False)
     for threshold in thresholds:
         decisions = np.where(llr > threshold, True, False)
         conf_matrix = confMatrix(decisions, labels)
@@ -233,7 +246,21 @@ def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
         min_dcf_values.append(min_dcf)
 
     return actual_dcf_values, min_dcf_values
+def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
+    pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
+    actual_dcf_values = []
+    min_dcf_values = []
 
+    for pi_eff_value in pi_eff:
+        act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), labels))
+        min_dcf = minDCF(llr, labels, pi_eff_value, Cfn, Cfp)
+
+        actual_dcf_values.append(act_dcf)
+        min_dcf_values.append(min_dcf)
+
+    return actual_dcf_values, min_dcf_values
+
+def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
 def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
     best_DCF = float('inf')
     best_min_DCF = float('inf')
@@ -248,7 +275,13 @@ def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
             predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL))
             min_dcf = minDCF(llrs, LVAL, pi1, Cfn, Cfp)
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
+            act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL))
+            min_dcf = minDCF(llrs, LVAL, pi1, Cfn, Cfp)
 
+            if act_dcf < best_DCF_version:
+                best_DCF_version = act_dcf
+                best_min_DCF_version = min_dcf
             if act_dcf < best_DCF_version:
                 best_DCF_version = act_dcf
                 best_min_DCF_version = min_dcf
@@ -311,8 +344,11 @@ def train_logreg(DTR, LTR, l, pi_T = 0, weighted=False):
     return result[0], result[1]
 
 def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
+def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
     scores = np.dot(w.T, D) + b
     llr_scores = scores - np.log(pi_emp / (1 - pi_emp))
+    predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
+    return predictions, llr_scores
     predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
     return predictions, llr_scores
 
@@ -354,6 +390,7 @@ def LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, Cfn=1, Cfp
 
 def expand_features(X):
     n_samples, n_features = X.shape
+    expanded_features = [X]
     expanded_features = [X]
     
     for i in range(n_features):
@@ -832,6 +869,24 @@ def eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, C_values, gamma_values):
     plt.savefig(f'plots/dcfs_vs_lambda/RBF.png')
     plt.show()
 
+def eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, C_values, gamma_values):
+    plt.rc('font', size=16)
+    plt.rc('xtick', labelsize=16)
+    plt.rc('ytick', labelsize=16)
+    plt.figure(figsize=(10, 6))
+    for title, gamma in gamma_values.items():
+        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
+        plt.plot(C_values, act_dcf_values, label=f'Actual DCF (γ: {title})', marker='o')
+        plt.plot(C_values, min_dcf_values, label=f'Minimum DCF (γ: {title})', marker='x')
+    plt.xscale('log', base=10)
+    plt.xlabel('C (log scale)')
+    plt.ylabel('DCF')
+    plt.title(f"DCF and MinDCF vs Lambda (RBF SVM)")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f'plots/dcfs_vs_lambda/RBF.png')
+    plt.show()
+
 def main():
     D, L = load_projectData()
     (DTR, LTR), (DVAL, LVAL) = split_db_2to1(D, L)
@@ -877,6 +932,7 @@ def main():
         
         for version in ["gaussian", "tied", "naive"]:
             predictions, llrs = llr_binary(2, DVAL.shape[1], DTR, LTR, DVAL, version)
+            predictions, llrs = llr_binary(2, DVAL.shape[1], DTR, LTR, DVAL, version)
             error_rate = np.sum(predictions != LVAL) / len(LVAL)
         
         cov_c1 = eval_cov(DTR[:, LTR == False])
@@ -886,6 +942,7 @@ def main():
 
         DTR_PCA, DVAL_PCA = PCA(DTR, 5, DVAL)
         for version in ["gaussian", "tied", "naive"]:
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             error_rate = np.sum(predictions != LVAL) / len(LVAL)
 
@@ -903,6 +960,9 @@ def main():
                     predictions, llrs = llr_binary(2, DVAL_.shape[1], DTR_, LTR_, DVAL_, version)
                     DCF = normDCF(pi1, Cfn, Cfp, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL_))
                     DCF_min = minDCF(llrs, LVAL_, pi1, Cfn, Cfp)
+                    predictions, llrs = llr_binary(2, DVAL_.shape[1], DTR_, LTR_, DVAL_, version)
+                    DCF = normDCF(pi1, Cfn, Cfp, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL_))
+                    DCF_min = minDCF(llrs, LVAL_, pi1, Cfn, Cfp)
                     calibration_loss = DCF - DCF_min
 
         best_m, best_DCF, best_min_DCF = bestmbyDCF(DTR, LTR, DVAL, LVAL, 0.1)
@@ -910,6 +970,8 @@ def main():
         logOddsRange = np.linspace(-4, 4, 50)
 
         for version in ["gaussian", "tied", "naive"]:
+            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
+            dcf, mindcf = pieffvsDCFs(llrs, LVAL, logOddsRange)
             predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             dcf, mindcf = pieffvsDCFs(llrs, LVAL, logOddsRange)
             plotBayesError(logOddsRange, dcf, mindcf, version)
