@@ -261,7 +261,6 @@ def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
     return actual_dcf_values, min_dcf_values
 
 def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
-def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
     best_DCF = float('inf')
     best_min_DCF = float('inf')
 
@@ -343,7 +342,6 @@ def train_logreg(DTR, LTR, l, pi_T = 0, weighted=False):
         result = opt.fmin_l_bfgs_b(logreg_obj, x0, args=(DTR, LTR, l), approx_grad=False)
     return result[0], result[1]
 
-def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
 def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
     scores = np.dot(w.T, D) + b
     llr_scores = scores - np.log(pi_emp / (1 - pi_emp))
