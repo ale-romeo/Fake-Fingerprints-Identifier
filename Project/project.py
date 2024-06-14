@@ -169,10 +169,6 @@ def llr_binary(num_classes, num_samples, DTR, LTR, DTE, version):
     predictions = np.where(llrs >= 0, True, False)
     return predictions, llrs
 
-    llrs = logS[1] - logS[0]
-    predictions = np.where(llrs >= 0, True, False)
-    return predictions, llrs
-
 def errorRateLab3(DVAL_lda, DTR_lda, LTR, LVAL, threshold=0):
     if threshold == 0:
         threshold = (DTR_lda[0, LTR==False].mean() + DTR_lda[0, LTR==True].mean()) / 2.0
@@ -197,16 +193,10 @@ def confMatrix(predictions, labels):
     TN = np.sum((predictions == False) & (labels == False))
     FP = np.sum((predictions == True) & (labels == False))
     FN = np.sum((predictions == False) & (labels == True))
-    TP = np.sum((predictions == True) & (labels == True))
-    TN = np.sum((predictions == False) & (labels == False))
-    FP = np.sum((predictions == True) & (labels == False))
-    FN = np.sum((predictions == False) & (labels == True))
     conf_matrix = np.array([[TN, FP], [FN, TP]])
     return conf_matrix
 
 def bayesRisk(pi1, Cfn, Cfp, conf_matrix):
-    Pfn = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])
-    Pfp = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])
     Pfn = conf_matrix[1, 0] / (conf_matrix[1, 0] + conf_matrix[1, 1])
     Pfp = conf_matrix[0, 1] / (conf_matrix[0, 1] + conf_matrix[0, 0])
     B = pi1 * Cfn * Pfn + (1 - pi1) * Cfp * Pfp
@@ -225,27 +215,12 @@ def minDCF(llr, labels, pi1, Cfn, Cfp):
     min_dcf = float('inf')
     for threshold in thresholds:
         decisions = np.where(llr > threshold, True, False)
-    for threshold in thresholds:
-        decisions = np.where(llr > threshold, True, False)
         conf_matrix = confMatrix(decisions, labels)
         dcf = normDCF(pi1, Cfn, Cfp, conf_matrix)
         min_dcf = min(min_dcf, dcf)
     
     return min_dcf
 
-def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
-    pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
-    actual_dcf_values = []
-    min_dcf_values = []
-
-    for pi_eff_value in pi_eff:
-        act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), labels))
-        min_dcf = minDCF(llr, labels, pi_eff_value, Cfn, Cfp)
-
-        actual_dcf_values.append(act_dcf)
-        min_dcf_values.append(min_dcf)
-
-    return actual_dcf_values, min_dcf_values
 def pieffvsDCFs(llr, labels, eff_prior_log_odds, Cfn=1, Cfp=1):
     pi_eff = 1 / (1 + np.exp(-eff_prior_log_odds))
     actual_dcf_values = []
@@ -274,13 +249,7 @@ def bestmbyDCF(DTR, LTR, DVAL, LVAL, pi1, Cfn=1, Cfp=1):
             predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
             act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL))
             min_dcf = minDCF(llrs, LVAL, pi1, Cfn, Cfp)
-            predictions, llrs = llr_binary(2, DVAL_PCA.shape[1], DTR_PCA, LTR, DVAL_PCA, version)
-            act_dcf = normDCF(pi1, 1, 1, confMatrix(optBayesDecisions(llrs, pi1, Cfn, Cfp), LVAL))
-            min_dcf = minDCF(llrs, LVAL, pi1, Cfn, Cfp)
 
-            if act_dcf < best_DCF_version:
-                best_DCF_version = act_dcf
-                best_min_DCF_version = min_dcf
             if act_dcf < best_DCF_version:
                 best_DCF_version = act_dcf
                 best_min_DCF_version = min_dcf
@@ -345,8 +314,6 @@ def train_logreg(DTR, LTR, l, pi_T = 0, weighted=False):
 def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
     scores = np.dot(w.T, D) + b
     llr_scores = scores - np.log(pi_emp / (1 - pi_emp))
-    predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
-    return predictions, llr_scores
     predictions = np.where(llr_scores > -np.log(pi1 * Cfn / ((1 - pi1) * Cfp)), True, False)
     return predictions, llr_scores
 
@@ -702,7 +669,11 @@ def pieffvsDCFsByClassifier(LVAL, eff_prior_log_odds, classifier, model, Cfn=1, 
         else:
             data = load_model('gmm', model, 'best_model.pkl')
         llr = data['validation_scores']
-        act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), LVAL))
+        if classifier == 'LogReg':
+            predictions = np.where(llr > -np.log(0.1 * Cfn / ((1 - 0.1) * Cfp)), True, False)
+            act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(predictions, LVAL))
+        else:
+            act_dcf = normDCF(pi_eff_value, Cfn, Cfp, confMatrix(optBayesDecisions(llr, pi_eff_value, Cfn, Cfp), LVAL))
         min_dcf = minDCF(llr, LVAL, pi_eff_value, Cfn, Cfp)
 
         actual_dcf_values.append(act_dcf)
@@ -825,7 +796,7 @@ def plotBayesError(eff_prior_log_odds, dcf, mindcf, title):
     plt.xlabel('Log-Odds of Effective Prior (p˜)')
     plt.ylabel('Normalized DCF')
     plt.ylim([0, 1.1])
-    plt.xlim([-3, 3])
+    plt.xlim([-4, 4])
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -1018,17 +989,25 @@ def main():
         pi_t = 0.1
         C_values = np.logspace(-5, 0, 11)
         logOddsRange = np.linspace(-4, 4, 50)
-        
+        '''
         for model in ["full", "diagonal"]:
             act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi_t)
             plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, model)
             
         bestClassifiers = bestClassifier(DTR, LTR, DVAL, LVAL, pi_t)
+        '''
+        bestClassifiers = {"GMM": {"Classifier Params": 'tied', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
+                      "LogReg": {"Classifier Params": 'quadratic', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
+                      "SVM": {"Classifier Params": 'rbf', "ActDCF": float('inf'), "MinDCF": float('inf')}
+                      }
         
         for classifier, data in bestClassifiers.items():
             act_dcf_values, min_dcf_values, model_params = pieffvsDCFsByClassifier(LVAL, logOddsRange, classifier, data["Classifier Params"])
-            n_comp1, n_comp2 = model_params["first_class_comps"], model_params["second_class_comps"]
-            plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
+            if classifier == 'GMM':
+                n_comp1, n_comp2 = model_params["first_class_comps"], model_params["second_class_comps"]
+                plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
+            else:
+                plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier)
 
         
     else:
