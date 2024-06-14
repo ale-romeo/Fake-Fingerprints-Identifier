@@ -1,3 +1,4 @@
+import itertools
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.linalg
@@ -452,6 +453,7 @@ def matrixRBFK(D, L, gamma, xi):
 def SVM(DTR, LTR, DVAL, LVAL, C_values, kernel_version, params, pi1=0.1, xi=0, K=1.0):
     min_dcf_values = []
     act_dcf_values = []
+    combined_scores = []
     d, c, gamma = 0, 0, 0
 
     LTR = np.where(LTR == True, 1, -1)
@@ -486,13 +488,17 @@ def SVM(DTR, LTR, DVAL, LVAL, C_values, kernel_version, params, pi1=0.1, xi=0, K
         min_dcf_values.append(min_dcf)
         act_dcf_values.append(act_dcf)
         
-        if min_dcf == min(min_dcf_values):
+        # Calculate the combined score
+        combined_score = 0.3 * act_dcf + 0.7 * min_dcf
+        combined_scores.append(combined_score)
+        # Save model parameters and validation scores
+        if combined_score == min(combined_scores):
             best_model_params = {'d': d, 'c': c} if kernel_version == 'poly' else {'gamma': gamma} if kernel_version == 'rbf' else None
             best_model_llr_scores = scores
         
     save_model('svm', kernel_version, 'best_model.pkl', best_model_params, best_model_llr_scores)
 
-    return act_dcf_values, min_dcf_values
+    return act_dcf_values, min_dcf_values, combined_scores
 
 def apply_eigenvalue_constraint(cov, psi):
     U, s, _ = np.linalg.svd(cov)
@@ -599,12 +605,14 @@ def train_gmms(DTR, LTR, first_comps, second_comps, version='full'):
             gmms[cls] = LBG_GMM(DTR_cls, max_components=second_comps, version=version)
     return gmms
 
-def GMM(DTR, LTR, DVAL, LVAL, model, n_comps=[1, 2, 4], pi=0.1, Cfn=1, Cfp=1):
+def GMM(DTR, LTR, DVAL, LVAL, model, n_comps=[1, 2, 4, 8, 16, 32], pi=0.1, Cfn=1, Cfp=1):
     act_dcf_values = []
     min_dcf_values = []
+    combined_scores = []
 
-    for first_n_comp in n_comps:
-        for second_n_comp in n_comps:
+    permutations = list(itertools.product(n_comps, repeat=2))
+
+    for (first_n_comp, second_n_comp) in permutations:
             gmms = train_gmms(DTR, LTR, first_n_comp, second_n_comp, model)
             llrs = llr_GMMs(DVAL, gmms[True], gmms[False])
             act_dcf = normDCF(pi, Cfn, Cfp, confMatrix(optBayesDecisions(llrs, pi, Cfn, Cfp), LVAL))
@@ -613,13 +621,17 @@ def GMM(DTR, LTR, DVAL, LVAL, model, n_comps=[1, 2, 4], pi=0.1, Cfn=1, Cfp=1):
             act_dcf_values.append(act_dcf)
             min_dcf_values.append(min_dcf)
 
-            if min_dcf == min(min_dcf_values):
+             # Calculate the combined score
+            combined_score = 0.3 * act_dcf + 0.7 * min_dcf
+            combined_scores.append(combined_score)
+            # Save model parameters and validation scores
+            if combined_score == min(combined_scores):
                 best_comp = {'first_class_comps': first_n_comp, 'second_class_comps': second_n_comp}
                 best_llrs = llrs
 
     save_model('gmm', model, 'best_model.pkl', best_comp, best_llrs)
 
-    return act_dcf_values, min_dcf_values
+    return act_dcf_values, min_dcf_values, combined_scores
 
 def bestClassifier(DTR, LTR, DVAL, LVAL, pi1):
     bestClassifier = {"GMM": {"Classifier Model": '', "Combined Score": float('inf')}, 
@@ -827,13 +839,29 @@ def plotDCFsvslambda(lambdas, normdcfs, mindcfs, title):
     plt.savefig(f'plots/dcfs_vs_lambda/{title}.png')
     plt.show()
 
+def plotGMMvsComponents(components, normdcfs, mindcfs, model):
+    components_str = [f"{x}-{y}" for x, y in components]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(components_str, normdcfs, label='Actual DCF', marker='o')
+    plt.plot(components_str, mindcfs, label='Minimum DCF', marker='x')
+    plt.xlabel('Components (first class - second class)')
+    plt.ylabel('DCF')
+    plt.title(f"Actual DCF and Minimum DCF vs Components ({model})")
+    plt.legend()
+    plt.grid(True)
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(f'plots/gmms_vs_comps/{model}.png')
+    plt.show()
+
 def eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, C_values, gamma_values):
     plt.rc('font', size=16)
     plt.rc('xtick', labelsize=16)
     plt.rc('ytick', labelsize=16)
     plt.figure(figsize=(10, 6))
     for title, gamma in gamma_values.items():
-        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
+        act_dcf_values, min_dcf_values, _ = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
         plt.plot(C_values, act_dcf_values, label=f'Actual DCF (γ: {title})', marker='o')
         plt.plot(C_values, min_dcf_values, label=f'Minimum DCF (γ: {title})', marker='x')
     plt.xscale('log', base=10)
@@ -851,7 +879,7 @@ def eval_plotDCFsvsCRBF(DTR, LTR, DVAL, LVAL, C_values, gamma_values):
     plt.rc('ytick', labelsize=16)
     plt.figure(figsize=(10, 6))
     for title, gamma in gamma_values.items():
-        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
+        act_dcf_values, min_dcf_values, _ = SVM(DTR, LTR, DVAL, LVAL, C_values, 'rbf', params=gamma)
         plt.plot(C_values, act_dcf_values, label=f'Actual DCF (γ: {title})', marker='o')
         plt.plot(C_values, min_dcf_values, label=f'Minimum DCF (γ: {title})', marker='x')
     plt.xscale('log', base=10)
@@ -981,7 +1009,7 @@ def main():
         }
 
         for model, params in models.items():
-            act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values, model, params[1])
+            act_dcf_values, min_dcf_values, _ = SVM(DTR, LTR, DVAL, LVAL, C_values, model, params[1])
             plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, params[0])
 
         gamma_values = {
@@ -994,11 +1022,10 @@ def main():
 
     elif choice == 8:
         pi_t = 0.1
-        C_values = np.logspace(-5, 0, 11)
         logOddsRange = np.linspace(-4, 4, 50)
         for model in ["full", "diagonal"]:
-            act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi_t)
-            plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, model)
+            act_dcf_values, min_dcf_values, _ = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi_t)
+            plotGMMvsComponents(list(itertools.product([1,2,4,8,16,32], repeat=2)), act_dcf_values, min_dcf_values, model)
             
         bestClassifiers = bestClassifier(DTR, LTR, DVAL, LVAL, pi_t)
         
@@ -1009,7 +1036,6 @@ def main():
                 plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
             else:
                 plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier)
-
         
     else:
         print('Wrong choice')
