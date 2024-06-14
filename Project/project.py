@@ -1028,6 +1028,7 @@ def main():
             plotGMMvsComponents(list(itertools.product([1,2,4,8,16,32], repeat=2)), act_dcf_values, min_dcf_values, model)
             
         bestClassifiers = bestClassifier(DTR, LTR, DVAL, LVAL, pi_t)
+        #{'GMM': {'Classifier Model': 'diagonal', 'Combined Score': 0.1468509984639017}, 'LogReg': {'Classifier Model': 'quadratic', 'Combined Score': 0.32202060931899645}, 'SVM': {'Classifier Model': 'rbf', 'Combined Score': 0.23686315924219148}}
         
         for classifier, data in bestClassifiers.items():
             act_dcf_values, min_dcf_values, model_params = pieffvsDCFsByClassifier(LVAL, logOddsRange, classifier, data["Classifier Model"])
