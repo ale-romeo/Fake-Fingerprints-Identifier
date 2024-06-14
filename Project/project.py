@@ -320,6 +320,8 @@ def llrScores(D, w, b, pi_emp, pi1, Cfn, Cfp):
 def LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, Cfn=1, Cfp=1):
     actual_dcf_values = []
     min_dcf_values = []
+    combined_scores = []
+
     weighted = True if model == 'weighted' else False
     if model == 'reduced':
         DTR, LTR = DTR[:, ::50], LTR[::50]
@@ -344,14 +346,18 @@ def LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model, Cfn=1, Cfp
         
         actual_dcf_values.append(actual_dcf)
         min_dcf_values.append(min_dcf)
+
+        # Calculate the combined score
+        combined_score = 0.3 * actual_dcf + 0.7 * min_dcf
+        combined_scores.append(combined_score)
         # Save model parameters and validation scores
-        if min_dcf == min(min_dcf_values):
+        if combined_score == min(combined_scores):
             best_model_params = {'weights': w_opt, 'bias': b_opt}
             best_model_llr_scores = llr_scores
         
     save_model('logreg', model, 'best_model.pkl', best_model_params, best_model_llr_scores)
 
-    return actual_dcf_values, min_dcf_values
+    return actual_dcf_values, min_dcf_values, combined_scores
 
 def expand_features(X):
     n_samples, n_features = X.shape
@@ -616,9 +622,9 @@ def GMM(DTR, LTR, DVAL, LVAL, model, n_comps=[1, 2, 4], pi=0.1, Cfn=1, Cfp=1):
     return act_dcf_values, min_dcf_values
 
 def bestClassifier(DTR, LTR, DVAL, LVAL, pi1):
-    bestClassifier = {"GMM": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
-                      "LogReg": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
-                      "SVM": {"Classifier Params": '', "ActDCF": float('inf'), "MinDCF": float('inf')}
+    bestClassifier = {"GMM": {"Classifier Model": '', "Combined Score": float('inf')}, 
+                      "LogReg": {"Classifier Model": '', "Combined Score": float('inf')}, 
+                      "SVM": {"Classifier Model": '', "Combined Score": float('inf')}
                       }
     lambdas = np.logspace(-3, 2, 11)
 
@@ -626,31 +632,32 @@ def bestClassifier(DTR, LTR, DVAL, LVAL, pi1):
         print(f"Training {classifier} classifier...")
         if classifier == 'LogReg':
             for model in ['reduced', 'quadratic', 'centered', 'znorm', 'pca']:
-                act_dcf_values, min_dcf_values = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi1, pi1, model)
-                if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
-                    bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                print(f"Training {model} LogReg...")
+                _, _, combined_scores = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi1, pi1, model)
+                if min(combined_scores) < bestClassifier[classifier]["Combined Score"]:
+                    bestClassifier[classifier] = {"Classifier Model": model, "Combined Score": min(combined_scores)}
         elif classifier == 'SVM':
             for model in ['linear', 'centered', 'poly', 'rbf']:
                 print(f"Training {model} SVM...")
                 if model == 'linear' or model == 'centered':
-                    act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=None, pi1=pi1)
-                    if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
-                        bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                    _, _, combined_scores = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=None, pi1=pi1)
+                    if min(combined_scores) < bestClassifier[classifier]["Combined Score"]:
+                        bestClassifier[classifier] = {"Classifier Model": model, "Combined Score": min(combined_scores)}
                 elif model == 'poly':
-                    act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=[2, 1], pi1=pi1)
-                    if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
-                        bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                    _, _, combined_scores = SVM(DTR, LTR, DVAL, LVAL, C_values=lambdas, kernel_version=model, params=[2, 1], pi1=pi1)
+                    if min(combined_scores) < bestClassifier[classifier]["Combined Score"]:
+                        bestClassifier[classifier] = {"Classifier Model": model, "Combined Score": min(combined_scores)}
                 elif model == 'rbf':
                     for gamma in [np.exp(-4), np.exp(-3), np.exp(-2), np.exp(-1)]:
-                        act_dcf_values, min_dcf_values = SVM(DTR, LTR, DVAL, LVAL, lambdas, model, gamma, pi1)
-                        if min(min_dcf_values) < bestClassifier[classifier]["MinDCF"]:
-                            bestClassifier[classifier] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                        _, _, combined_scores = SVM(DTR, LTR, DVAL, LVAL, lambdas, model, gamma, pi1)
+                        if min(combined_scores) < bestClassifier[classifier]["Combined Score"]:
+                            bestClassifier[classifier] = {"Classifier Model": model, "Combined Score": min(combined_scores)}
         else:
             for model in ['full', 'diagonal', 'tied']:
                 print(f"Training {model} GMM...")
-                act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi1)
-                if min(min_dcf_values) < bestClassifier['GMM']["MinDCF"]:
-                    bestClassifier['GMM'] = {"Classifier Params": model, "ActDCF": min(act_dcf_values), "MinDCF": min(min_dcf_values)}
+                _, _, combined_scores = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi1)
+                if min(combined_scores) < bestClassifier[classifier]["Combined Score"]:
+                    bestClassifier[classifier] = {"Classifier Model": model, "Combined Score": min(combined_scores)}
 
         print(bestClassifier)
 
@@ -962,7 +969,7 @@ def main():
         }
 
         for model, title in models.items():
-            normDCF_values, minDCF_values = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model)
+            normDCF_values, minDCF_values, _ = LogRegression(DTR, LTR, DVAL, LVAL, lambdas, pi_T, pi_emp, model)
             plotDCFsvslambda(lambdas, normDCF_values, minDCF_values, title)
 
     elif choice == 7:
@@ -989,20 +996,14 @@ def main():
         pi_t = 0.1
         C_values = np.logspace(-5, 0, 11)
         logOddsRange = np.linspace(-4, 4, 50)
-        '''
         for model in ["full", "diagonal"]:
             act_dcf_values, min_dcf_values = GMM(DTR, LTR, DVAL, LVAL, model, pi=pi_t)
             plotDCFsvslambda(C_values, act_dcf_values, min_dcf_values, model)
             
         bestClassifiers = bestClassifier(DTR, LTR, DVAL, LVAL, pi_t)
-        '''
-        bestClassifiers = {"GMM": {"Classifier Params": 'tied', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
-                      "LogReg": {"Classifier Params": 'quadratic', "ActDCF": float('inf'), "MinDCF": float('inf')}, 
-                      "SVM": {"Classifier Params": 'rbf', "ActDCF": float('inf'), "MinDCF": float('inf')}
-                      }
         
         for classifier, data in bestClassifiers.items():
-            act_dcf_values, min_dcf_values, model_params = pieffvsDCFsByClassifier(LVAL, logOddsRange, classifier, data["Classifier Params"])
+            act_dcf_values, min_dcf_values, model_params = pieffvsDCFsByClassifier(LVAL, logOddsRange, classifier, data["Classifier Model"])
             if classifier == 'GMM':
                 n_comp1, n_comp2 = model_params["first_class_comps"], model_params["second_class_comps"]
                 plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
