@@ -895,7 +895,7 @@ def main():
     D, L = load_projectData()
     (DTR, LTR), (DVAL, LVAL) = split_db_2to1(D, L)
 
-    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6, 7, 8")
+    print("Which lab do you want to run?\n Available:\t 1, 2, 3, 4, 5, 6, 7, 8, 9")
     choice = int(input('>\t'))
 
     if choice == 1:
@@ -1037,7 +1037,10 @@ def main():
                 plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier + f"_comps_{n_comp1}_{n_comp2}")
             else:
                 plotBayesError(logOddsRange, act_dcf_values, min_dcf_values, classifier)
-        
+
+    elif choice == 9:
+        print("Nothin' to see here...")
+
     else:
         print('Wrong choice')
 
