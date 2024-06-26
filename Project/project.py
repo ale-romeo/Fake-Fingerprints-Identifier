@@ -1240,7 +1240,7 @@ def main():
 
             # Last point of the evaluation
             logOddsRange = np.linspace(-4, 4, 50)
-            for model in ["full", "diagonal"]:
+            for model in ["full", "diagonal", "tied"]:
                 act_dcf_values, min_dcf_values, _ = GMM(DTR, LTR, SVAL, LSVAL, model, pi=pi_t)
                 plotGMMvsComponents(list(itertools.product([1,2,4,8,16,32], repeat=2)), act_dcf_values, min_dcf_values, model)
                 
