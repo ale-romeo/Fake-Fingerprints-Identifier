@@ -39,6 +39,34 @@ The dataset used in this project consists of 6-dimensional feature vectors. The 
 - Evaluate the impact of regularization on classification performance.
 - Analyze the effects of data preprocessing techniques like centering and PCA.
 
+### 7. Support Vector Machines
+
+- Train support vector machine models with different kernel functions and parameters.
+- Evaluate the impact of kernel functions and parameters on classification performance.
+- Visualize the decision boundaries of support vector machine models.
+- Analyze the effects of data preprocessing techniques like centering and polynomial feature expansion.
+
+### 8. Gaussian Mixture Models
+
+- Train Gaussian mixture models with different covariance types and number of components.
+- Evaluate the impact of covariance types and number of components on classification performance.
+- Visualize the decision boundaries of Gaussian mixture models.
+- Save the best classifier based on combined score.
+- Evaluate the performance of the best classifier using pieff vs DCFs plots.
+
+### 9. Model Evaluation and Fusion
+
+- Load the best classifiers for logistic regression, support vector machines, and Gaussian mixture models.
+- Evaluate the performance of the best classifiers using pieff vs DCFs plots.
+- Perform k-fold calibration on the validation scores of the best classifiers.
+- Evaluate the performance of the calibrated scores using pieff vs DCFs plots.
+- Fuse the scores of logistic regression, support vector machines, and Gaussian mixture models.
+- Evaluate the performance of the fused scores using pieff vs DCFs plots.
+- Apply the best classifier to the evaluation dataset.
+- Evaluate the performance of the best classifier on the evaluation dataset using pieff vs DCFs plots.
+- Visualize the decision boundaries of Gaussian mixture models with different covariance types and number of components.
+- 
+
 ## Project Structure
 
 ML-Project/
